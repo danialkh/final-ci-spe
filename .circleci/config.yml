@@ -5,11 +5,11 @@ version: 2.1
 #   every push / PR : check-version + lint, test and coverage on 3 platforms (JVM, Python, Node.js)
 #   main + vX.Y.Z   : build all images, smoke-test the whole stack with docker compose
 #                     (incl. PostgreSQL and an MQTT round trip through Mosquitto),
-#                     then push multi-arch images (linux/amd64, linux/arm64) to ghcr.io
+#                     then push multi-arch images (linux/amd64, linux/arm64) to ghcr.io (if credentials are set)
 #
 # Needs two project environment variables (CircleCI -> Project Settings -> Environment Variables):
-#   GHCR_USER   your GitHub username
-#   GHCR_TOKEN  a GitHub personal access token with the write:packages scope
+#   GHCR_USER    your GitHub username (optional if skipping push)
+#   GHCR_TOKEN   a GitHub personal access token with the write:packages scope (optional if skipping push)
 
 orbs:
   node: circleci/node@5.1.0
@@ -124,7 +124,7 @@ jobs:
           path: coverage
           destination: node-coverage
 
-  # 4. Delivery: build images, smoke-test the stack, push multi-arch images to ghcr.io
+  # 4. Delivery: build images, smoke-test the stack, push multi-arch images to ghcr.io (if configured)
   multi-platform-build-and-delivery:
     machine:
       image: ubuntu-2204:current
@@ -136,26 +136,33 @@ jobs:
           name: Check registry credentials
           command: |
             if [ -z "${GHCR_USER:-}" ] || [ -z "${GHCR_TOKEN:-}" ]; then
-              echo "GHCR_USER / GHCR_TOKEN are not set."
-              echo "Add them in CircleCI -> Project Settings -> Environment Variables."
-              exit 1
+              echo "WARNING: GHCR_USER / GHCR_TOKEN are not set."
+              echo "Pushing to GitHub Container Registry will be skipped, but building and smoke-testing will proceed."
+              echo "export SKIP_PUSH=true" >> "$BASH_ENV"
+            else
+              echo "export SKIP_PUSH=false" >> "$BASH_ENV"
             fi
       - run:
           name: Work out image names and tags
           command: |
-            OWNER=$(echo "$CIRCLE_PROJECT_USERNAME" | tr '[:upper:]' '[:lower:]')
+            OWNER=$(echo "${CIRCLE_PROJECT_USERNAME:-local}" | tr '[:upper:]' '[:lower:]')
             echo "export IMAGE_PREFIX=ghcr.io/${OWNER}/spe" >> "$BASH_ENV"
             if [ -n "${CIRCLE_TAG:-}" ]; then
               echo "export TAG=${CIRCLE_TAG#v}" >> "$BASH_ENV"
             else
-              echo "export TAG=sha-${CIRCLE_SHA1:0:7}" >> "$BASH_ENV"
+              echo "export TAG=sha-${CIRCLE_SHA1:-local}" >> "$BASH_ENV"
             fi
       - run:
           name: Show what will be published
           command: echo "Publishing ${IMAGE_PREFIX}-<service>:${TAG} and :latest for ${PLATFORMS}"
       - run:
           name: Log in to GitHub Container Registry
-          command: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          command: |
+            if [ "$SKIP_PUSH" = "true" ]; then
+              echo "Skipping docker login (no credentials provided)."
+            else
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            fi
       - run:
           name: Build all images (linux/amd64)
           command: docker compose build
@@ -227,6 +234,10 @@ jobs:
           name: Build and push multi-arch images
           no_output_timeout: 30m
           command: |
+            if [ "$SKIP_PUSH" = "true" ]; then
+              echo "Skipping image push (no registry credentials provided)."
+              exit 0
+            fi
             set -e
             push() {
               docker buildx build --platform "$PLATFORMS" \
